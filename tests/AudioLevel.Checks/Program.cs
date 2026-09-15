@@ -60,6 +60,83 @@ using (var buffer = new RecordingBuffer(new NAudio.Wave.WaveFormat(192000, 32, 8
 }
 Console.WriteLine("PASS: empty buffer, WAV round trip, copied packets, duration/memory limits");
 
+// Exercise capture-format conversion independently of the recognition model.
+foreach (var format in new NAudio.Wave.WaveFormat[]
+{
+    new(48000, 16, 2), new(44100, 24, 1), new(32000, 32, 2),
+    NAudio.Wave.WaveFormat.CreateIeeeFloatWaveFormat(48000, 2),
+    new NAudio.Wave.WaveFormatExtensible(48000, 32, 2)
+})
+{
+    using var wav = new System.IO.MemoryStream();
+    using (var writer = new NAudio.Wave.WaveFileWriter(wav, format))
+        writer.Write(new byte[format.AverageBytesPerSecond], 0, format.AverageBytesPerSecond);
+    var samples = GameLanguageAssistant.Speech.WhisperAudio.Convert(wav.ToArray(), CancellationToken.None);
+    if (Math.Abs(samples.Length - 16000) > 32 || samples.Any(x => x != 0))
+        throw new Exception($"Silence resampling failed: {format}, {samples.Length}");
+}
+var toneWav = new System.IO.MemoryStream();
+using (var writer = new NAudio.Wave.WaveFileWriter(toneWav, NAudio.Wave.WaveFormat.CreateIeeeFloatWaveFormat(48000, 2)))
+{
+    for (var i = 0; i < 48000 * 2; i++)
+    {
+        var sample = (float)(0.15 * Math.Sin(2 * Math.PI * 440 * i / 48000));
+        writer.WriteSample(sample);
+        writer.WriteSample(sample);
+    }
+}
+var toneBytes = toneWav.ToArray();
+var converted = GameLanguageAssistant.Speech.WhisperAudio.Convert(toneBytes, CancellationToken.None);
+if (Math.Abs(converted.Length - 32000) > 32 || converted.Max() < 0.1 || converted.Max() > 0.2)
+    throw new Exception("Resampling duration/amplitude failed");
+using (var canceled = new CancellationTokenSource())
+{
+    canceled.Cancel();
+    try
+    {
+        GameLanguageAssistant.Speech.WhisperAudio.Convert(toneBytes, canceled.Token);
+        throw new Exception("Conversion ignored cancellation");
+    }
+    catch (OperationCanceledException) { }
+}
+Console.WriteLine("PASS: PCM/float/extensible mono 16k conversion, amplitude, duration, cancellation");
+
+if (args.Contains("--whisper-smoke"))
+{
+    var engine = new GameLanguageAssistant.Speech.LocalWhisperRecognizer(
+        System.IO.Path.Combine(AppContext.BaseDirectory, "models", "ggml-base.bin"));
+    var clock = System.Diagnostics.Stopwatch.StartNew();
+    var text = await engine.RecognizeAsync(new RecordedAudio(toneBytes, TimeSpan.FromSeconds(2), false), CancellationToken.None);
+    Console.WriteLine($"PASS: actual Whisper model inference, {clock.Elapsed.TotalSeconds:F1}s, output length {text.Length} (synthetic tone, not an accuracy test)");
+    using var canceled = new CancellationTokenSource();
+    canceled.Cancel();
+    try
+    {
+        await engine.RecognizeAsync(new RecordedAudio(toneBytes, TimeSpan.FromSeconds(2), false), canceled.Token);
+        throw new Exception("Recognizer ignored cancellation");
+    }
+    catch (OperationCanceledException) { Console.WriteLine("PASS: recognizer cancellation"); }
+    using var duringInference = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+    try
+    {
+        await engine.RecognizeAsync(new RecordedAudio(toneBytes, TimeSpan.FromSeconds(2), false), duringInference.Token);
+        throw new Exception("Active recognizer ignored cancellation");
+    }
+    catch (OperationCanceledException) { Console.WriteLine("PASS: cancellation during model loading/inference"); }
+    await engine.RecognizeAsync(new RecordedAudio(toneBytes, TimeSpan.FromSeconds(2), false), CancellationToken.None);
+    Console.WriteLine("PASS: inference succeeds again after cancellation");
+    var missing = new GameLanguageAssistant.Speech.LocalWhisperRecognizer(
+        System.IO.Path.Combine(AppContext.BaseDirectory, "models", "does-not-exist.bin"));
+    try
+    {
+        await missing.RecognizeAsync(new RecordedAudio(toneBytes, TimeSpan.FromSeconds(2), false), CancellationToken.None);
+        throw new Exception("Missing model was not reported");
+    }
+    catch (System.IO.FileNotFoundException) { Console.WriteLine("PASS: missing model error"); }
+}
+Array.Clear(toneBytes);
+Array.Clear(converted);
+
 // Explicit opt-in: briefly captures the first device, without saving or transmitting audio.
 if (args.Contains("--microphone-smoke"))
 {

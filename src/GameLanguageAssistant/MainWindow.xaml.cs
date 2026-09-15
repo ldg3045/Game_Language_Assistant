@@ -4,6 +4,9 @@ using System.Windows.Threading;
 using GameLanguageAssistant.Audio;
 using NAudio.Wave;
 using System.Diagnostics;
+using System.IO;
+using GameLanguageAssistant.Speech;
+using GameLanguageAssistant.Translation;
 
 namespace GameLanguageAssistant;
 
@@ -15,10 +18,19 @@ public partial class MainWindow : Window
     private RecordedAudio? recordedAudio;
     private readonly Stopwatch recordingClock = new();
     private bool stopRequested;
+    private readonly ISpeechRecognizer recognizer = new LocalWhisperRecognizer(Path.Combine(AppContext.BaseDirectory, "models", "ggml-base.bin"));
+    private CancellationTokenSource? recognitionCancellation;
+    private int transcriptVersion;
+    private readonly System.Net.Http.HttpClient translationClient = OllamaTranslationService.CreateLocalClient();
+    private readonly ITranslationService translationService;
 
-    public MainWindow()
+    public MainWindow() : this(null) { }
+
+    public MainWindow(ITranslationService? translationService)
     {
+        this.translationService = translationService ?? new OllamaTranslationService(translationClient);
         InitializeComponent();
+        KoreanTranscript.TextChanged += KoreanTranscript_TextChanged;
         meterTimer.Tick += UpdateMeter;
         Loaded += (_, _) => RefreshDevices();
         Closed += (_, _) =>
@@ -26,6 +38,7 @@ public partial class MainWindow : Window
             closing = true;
             ReleaseMicrophone();
             ClearRecording();
+            translationClient.Dispose();
         };
     }
 
@@ -59,7 +72,7 @@ public partial class MainWindow : Window
 
     private void StartMicrophone_Click(object sender, RoutedEventArgs e)
     {
-        if (microphone is not null || DeviceList.SelectedItem is not MicrophoneDevice selected) return;
+        if (microphone is not null || recognitionCancellation is not null || translationCancellation is not null || DeviceList.SelectedItem is not MicrophoneDevice selected) return;
         ClearRecording();
         stopRequested = false;
         microphone = new MicrophoneInput();
@@ -70,6 +83,7 @@ public partial class MainWindow : Window
             recordingClock.Restart();
             RecordingStatus.Text = "음성 수집 중 · 최대 60초 / 16 MiB";
             MicrophoneStatus.Text = "입력 중 — 마이크에 말하면 음량 막대가 움직입니다.";
+            TranscriptionStatus.Text = "녹음 종료 후 한국어를 인식합니다.";
             meterTimer.Start();
         }
         catch (Exception ex)
@@ -111,7 +125,7 @@ public partial class MainWindow : Window
                 var limited = recordedAudio?.LimitReached == true || recordingClock.Elapsed.TotalSeconds >= RecordingBuffer.MaxSeconds;
                 RecordingStatus.Text = recordedAudio is null
                     ? "수집된 오디오가 없습니다. 마이크를 확인하고 다시 시작하세요."
-                    : $"수집 완료: {recordedAudio.Duration.TotalSeconds:F1}초 · {recordedAudio.WaveBytes.Length / 1024d:F1} KiB (WAV)\n음성 인식 서비스 연결 전입니다.";
+                    : $"수집 완료: {recordedAudio.Duration.TotalSeconds:F1}초 · {recordedAudio.WaveBytes.Length / 1024d:F1} KiB (WAV)";
                 MicrophoneStatus.Text = limited ? "입력 한도에 도달해 자동 종료했습니다." : "대기 — 마이크 입력을 종료했습니다.";
             }
             catch (Exception ex)
@@ -124,6 +138,7 @@ public partial class MainWindow : Window
                 ReleaseMicrophone();
                 UpdateControls();
             }
+            if (recordedAudio is not null) _ = RecognizeRecordingAsync();
         }));
     }
 
@@ -154,11 +169,17 @@ public partial class MainWindow : Window
     private void UpdateControls()
     {
         var active = microphone is not null;
-        StartButton.IsEnabled = !active && DeviceList.SelectedItem is MicrophoneDevice;
+        var recognizing = recognitionCancellation is not null;
+        var translating = translationCancellation is not null;
+        StartButton.IsEnabled = !active && !recognizing && !translating && DeviceList.SelectedItem is MicrophoneDevice;
         StopButton.IsEnabled = active && !stopRequested;
         DeviceList.IsEnabled = !active;
         RefreshButton.IsEnabled = !active;
         if (ClearRecordingButton is not null) ClearRecordingButton.IsEnabled = !active && recordedAudio is not null;
+        if (RetryRecognitionButton is not null) RetryRecognitionButton.IsEnabled = !active && !recognizing && !translating && recordedAudio is not null;
+        if (CancelRecognitionButton is not null) CancelRecognitionButton.IsEnabled = recognizing && !recognitionCancellation!.IsCancellationRequested;
+        if (TranslateButton is not null) TranslateButton.IsEnabled = !active && !recognizing && !translating && !string.IsNullOrWhiteSpace(KoreanTranscript.Text);
+        if (CancelTranslationButton is not null) CancelTranslationButton.IsEnabled = translating && !translationCancellation!.IsCancellationRequested;
     }
 
     private void ClearRecording_Click(object sender, RoutedEventArgs e)
@@ -169,9 +190,67 @@ public partial class MainWindow : Window
 
     private void ClearRecording()
     {
+        transcriptVersion++;
+        recognitionCancellation?.Cancel();
+        ResetTranslation();
+        KoreanTranscript.Clear();
+        KoreanTranscript.IsReadOnly = true;
+        TranscriptionStatus.Text = "마이크를 시작하고 한국어로 말해 주세요.";
         if (recordedAudio is not null) Array.Clear(recordedAudio.WaveBytes);
         recordedAudio = null;
         RecordingStatus.Text = "수집한 음성 없음 · 최대 60초 / 16 MiB";
+    }
+
+    private async void RetryRecognition_Click(object sender, RoutedEventArgs e) => await RecognizeRecordingAsync();
+
+    private void CancelRecognition_Click(object sender, RoutedEventArgs e)
+    {
+        recognitionCancellation?.Cancel();
+        TranscriptionStatus.Text = "인식 취소 중… 진행 중인 계산이 끝나면 결과를 버립니다.";
+        UpdateControls();
+    }
+
+    private async Task RecognizeRecordingAsync()
+    {
+        if (closing || microphone is not null || recordedAudio is null || recognitionCancellation is not null || translationCancellation is not null) return;
+        // The worker owns a copy: clearing/closing can erase the UI's recording safely.
+        var snapshot = recordedAudio with { WaveBytes = recordedAudio.WaveBytes.ToArray() };
+        var version = ++transcriptVersion;
+        var cancellation = new CancellationTokenSource();
+        recognitionCancellation = cancellation;
+        KoreanTranscript.Clear();
+        KoreanTranscript.IsReadOnly = true;
+        TranscriptionStatus.Text = "한국어를 인식하고 있습니다. 잠시 기다려 주세요.";
+        UpdateControls();
+        var clock = Stopwatch.StartNew();
+        try
+        {
+            var text = await recognizer.RecognizeAsync(snapshot, cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (closing || version != transcriptVersion) return;
+            KoreanTranscript.Text = text;
+            KoreanTranscript.IsReadOnly = string.IsNullOrWhiteSpace(text);
+            TranscriptionStatus.Text = string.IsNullOrWhiteSpace(text)
+                ? "인식된 말이 없습니다. 다시 녹음해 주세요."
+                : $"인식 완료 · {clock.Elapsed.TotalSeconds:F1}초 — 필요하면 원문을 수정하세요.";
+        }
+        catch (OperationCanceledException)
+        {
+            if (!closing && version == transcriptVersion)
+                TranscriptionStatus.Text = "인식을 취소했습니다. 다시 인식하거나 새로 녹음할 수 있습니다.";
+        }
+        catch (Exception ex)
+        {
+            if (!closing && version == transcriptVersion)
+                TranscriptionStatus.Text = $"음성 인식 실패: {ex.Message}\n모델과 실행 환경을 확인한 뒤 다시 인식하세요.";
+        }
+        finally
+        {
+            Array.Clear(snapshot.WaveBytes);
+            recognitionCancellation = null;
+            cancellation.Dispose();
+            if (!closing) UpdateControls();
+        }
     }
 
     private void ShowMicrophoneError(Exception ex)
@@ -180,10 +259,4 @@ public partial class MainWindow : Window
         MicrophoneStatus.Text = $"마이크 오류: {ex.Message}\n장치 연결과 Windows 마이크 접근 권한을 확인한 뒤 새로고침하세요.";
     }
 
-    private void ShowExample_Click(object sender, RoutedEventArgs e)
-    {
-        // 첫 실습: AI 호출 없이 준비된 문장을 화면에 표시합니다.
-        EnglishText.Text = "I'll come with you.";
-        PronunciationText.Text = "아일 컴 위드 유";
-    }
 }

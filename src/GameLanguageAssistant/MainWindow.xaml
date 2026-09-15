@@ -1,14 +1,14 @@
 <Window x:Class="GameLanguageAssistant.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="게임 영어 도우미" Width="620" Height="730"
+        Title="게임 영어 도우미" Width="620" Height="860"
         MinWidth="440" MinHeight="340" WindowStartupLocation="CenterScreen"
         FontFamily="Malgun Gothic" Background="#F5F7FA">
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="28">
             <TextBlock Text="게임 영어 도우미" FontSize="26" FontWeight="SemiBold" />
             <TextBlock Margin="0,10,0,22" TextWrapping="Wrap" Foreground="#475569"
-                       Text="마이크를 선택하고 입력을 시작해 소리가 들어오는지 확인하세요." />
+                       Text="한국어로 말한 뒤 마이크를 종료하면 원문을 표시합니다." />
             <Label Content="입력 마이크" Target="{Binding ElementName=DeviceList}" Padding="0,0,0,6" />
             <DockPanel>
                 <Button x:Name="RefreshButton" DockPanel.Dock="Right" Content="새로고침"
@@ -31,8 +31,27 @@
                        TextWrapping="Wrap" Margin="0,0,0,8" />
             <Button x:Name="ClearRecordingButton" Content="수집한 음성 지우기" IsEnabled="False"
                     Click="ClearRecording_Click" HorizontalAlignment="Left" Padding="12,6" Margin="0,0,0,18" />
-            <Button Content="예시 문장 보기" Click="ShowExample_Click"
-                    HorizontalAlignment="Left" Padding="18,10" FontSize="16" />
+            <Label Content="한국어 원문" Target="{Binding ElementName=KoreanTranscript}" Padding="0,0,0,6" />
+            <TextBox x:Name="KoreanTranscript" MinHeight="90" MaxHeight="180" Padding="12"
+                     TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
+                     FontSize="20" IsReadOnly="True" IsUndoEnabled="False"
+                     AutomationProperties.Name="인식된 한국어 원문" />
+            <TextBlock x:Name="TranscriptionStatus" Text="마이크를 시작하고 한국어로 말해 주세요."
+                       TextWrapping="Wrap" Foreground="#475569" Margin="0,6,0,8" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
+                <Button x:Name="RetryRecognitionButton" Content="녹음 다시 인식" Click="RetryRecognition_Click"
+                        Padding="12,6" IsEnabled="False" ToolTip="보관한 음성을 다시 인식합니다. 수정한 원문은 새 결과로 바뀝니다." />
+                <Button x:Name="CancelRecognitionButton" Content="인식 취소" Click="CancelRecognition_Click"
+                        Padding="12,6" Margin="10,0,0,0" IsEnabled="False" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="TranslateButton" Content="번역하기" Click="Translate_Click"
+                        Padding="18,10" FontSize="16" IsEnabled="False" />
+                <Button x:Name="CancelTranslationButton" Content="번역 취소" Click="CancelTranslation_Click"
+                        Padding="12,6" Margin="10,0,0,0" IsEnabled="False" />
+            </StackPanel>
+            <TextBlock x:Name="TranslationStatus" Text="원문을 확인한 뒤 번역하기를 누르세요."
+                       TextWrapping="Wrap" Margin="0,8,0,0" Foreground="#475569" />
             <Border Margin="0,20,0,0" Padding="18" Background="White"
                     BorderBrush="#CBD5E1" BorderThickness="1" CornerRadius="8">
                 <StackPanel>
@@ -43,7 +62,7 @@
                 </StackPanel>
             </Border>
             <TextBlock Margin="0,16,0,0" TextWrapping="Wrap" FontSize="13" Foreground="#475569"
-                       Text="음성은 메모리에만 보관하며 파일 저장·서버 전송은 하지 않습니다. 새 입력 시작 또는 창 닫기 시 이전 음성을 지웁니다. 예시 문장은 음성 인식 결과가 아닙니다. 게임 마이크 송신은 별도로 제어하세요." />
+                       Text="음성 인식과 번역은 PC에서 처리합니다. 번역할 원문만 PC 내부의 Ollama에 전달하며 외부 서버로 보내지 않습니다. 원문을 수정하면 이전 번역은 지워집니다. 게임 마이크 송신은 별도로 제어하세요." />
         </StackPanel>
     </ScrollViewer>
 </Window>
